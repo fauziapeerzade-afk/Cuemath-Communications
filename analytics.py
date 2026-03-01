@@ -58,13 +58,13 @@ def load_data(file):
 
     df = raw.iloc[header_row + 1:].reset_index(drop=True)
 
-    # Period label → key (include both "Dec 31" and "dec31" style)
+    # Period label → key (both "Dec 31" and "dec31" style)
     PERIOD_DETECT = {}
     for label, key in PERIODS.items():
         PERIOD_DETECT[label.lower()] = key
-        PERIOD_DETECT[key.lower()] = key
+        PERIOD_DETECT[key.lower()]   = key
 
-    # Offense header keyword → suffix (longer/more specific phrases first to avoid partial matches)
+    # Offense header keyword → suffix (longer/specific phrases first to avoid partial matches)
     OFFENSE_DETECT = [
         ("trial late login",       "trial_late_login"),
         ("trial not acknowledged", "trial_not_acknowledged"),
@@ -76,20 +76,33 @@ def load_data(file):
         ("rating",                 "rating"),
     ]
 
-    # Static column keywords (more specific first)
+    # Static column keywords — more specific first.
+    # Includes licence, remarks, reasons so they are auto-detected and never
+    # shift the offset of the CD Name and period columns that follow them.
     STATIC_DETECT = [
         ("db id",            "db_id"),
         ("dbid",             "db_id"),
         ("teacher name",     "teacher_name"),
         ("comms contact",    "comms_contact"),
         ("teacher contact",  "teacher_contact"),
+        ("licence",          "license_region"),   # British spelling
+        ("license",          "license_region"),   # American spelling
         ("cd name",          "cd_name"),
         ("cluster director", "cd_name"),
         ("cluster",          "cd_name"),
+        # Remarks / reasons — any of these keywords auto-map to cd_remarks
+        ("cd remark",        "cd_remarks"),
+        ("remark",           "cd_remarks"),
+        ("miss reason",      "cd_remarks"),
+        ("reason for miss",  "cd_remarks"),
+        ("reason",           "cd_remarks"),
+        ("comment",          "cd_remarks"),
+        ("cd note",          "cd_remarks"),
+        ("note",             "cd_remarks"),
     ]
 
-    new_cols       = []
-    col_map_debug  = []
+    new_cols      = []
+    col_map_debug = []
 
     for idx in range(len(col_names_row)):
         col_val    = str(col_names_row.iloc[idx]).strip().lower()
@@ -97,7 +110,7 @@ def load_data(file):
         orig_col   = str(col_names_row.iloc[idx]).strip()
         orig_per   = period_filled[idx] if idx < len(period_filled) else ""
 
-        # Try static match first
+        # Try static match first (catches DB ID, Teacher Name, Licence, CD Name, etc.)
         static = None
         for k, v in STATIC_DETECT:
             if k in col_val:
@@ -108,14 +121,14 @@ def load_data(file):
             col_map_debug.append((orig_col, orig_per, static))
             continue
 
-        # Get period key from period row
+        # Get period key from the period header row
         period_key_found = None
         for k, v in PERIOD_DETECT.items():
             if k in period_val:
                 period_key_found = v
                 break
 
-        # Get offense suffix
+        # Get offense suffix from the column name
         offense_found = None
         for k, v in OFFENSE_DETECT:
             if k in col_val:
@@ -130,14 +143,19 @@ def load_data(file):
         new_cols.append(mapped)
         col_map_debug.append((orig_col, orig_per, mapped))
 
-    # Fallback to positional mapping if too many columns were not detected
+    # Positional fallback — used when headers cannot be read (e.g. blank header row).
+    # Structure: DB ID | Teacher Name | Teacher Contact | Comms Contact | Licence | CD Name | [periods] | Remarks
     extra_count = sum(1 for c in new_cols if c.startswith("extra_col"))
     if extra_count > len(new_cols) * 0.4:
-        new_cols = ["db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"]
+        new_cols = [
+            "db_id", "teacher_name", "teacher_contact",
+            "comms_contact", "license_region", "cd_name",
+        ]
         for key in PERIODS.values():
             for s in ["trial_late_login", "class_no_show", "class_late_login",
                       "trial_no_show", "trial_not_acknowledged", "total_offenses", "rating"]:
                 new_cols.append(f"{key}_{s}")
+        new_cols.append("cd_remarks")
         col_map_debug = [(c, "positional fallback", c) for c in new_cols]
 
     while len(new_cols) < len(df.columns):
@@ -147,7 +165,8 @@ def load_data(file):
     # Numeric conversion for offense/count columns
     for col in df.columns:
         if "rating" not in col and col not in [
-            "db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"
+            "db_id", "teacher_name", "teacher_contact",
+            "comms_contact", "license_region", "cd_name",
         ] and not col.startswith("extra_col"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -187,15 +206,15 @@ if "df" not in st.session_state:
 df        = st.session_state["df"]
 col_debug = st.session_state.get("col_debug", [])
 
-# Column mapping verification — click to check if offenses are correctly detected
-with st.expander("🔎 Verify Column Mapping — click here to check offense columns are correct"):
+# Column mapping verification expander — use this to confirm offenses are detected correctly
+with st.expander("🔎 Verify Column Mapping — click to check offense columns are correctly detected"):
     if col_debug:
         debug_show = [(o, p, m) for o, p, m in col_debug if not m.startswith("extra_col")]
         debug_df   = pd.DataFrame(debug_show, columns=["Your Column Header", "Period", "Mapped As"])
         st.dataframe(debug_df, use_container_width=True, hide_index=True)
         extra_n = sum(1 for _, _, m in col_debug if m.startswith("extra_col"))
         if extra_n > 0:
-            st.caption(f"{extra_n} extra/unmapped columns are hidden above.")
+            st.caption(f"{extra_n} extra/unmapped columns hidden above.")
     else:
         st.info("Upload data to see column mapping.")
 
@@ -208,28 +227,47 @@ period_key   = PERIODS[period_label]
 rcol         = f"{period_key}_rating"
 tcol         = f"{period_key}_total_offenses"
 
-# Remarks & license column selectors
-extra_cols = [c for c in df.columns if c.startswith("extra_col")]
-all_cols   = ["— not mapped —"] + extra_cols + [
-    c for c in df.columns if c not in extra_cols and not any(
-        c.startswith(k) for k in list(PERIODS.values())
-    ) and c not in ["db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"]
+# Build candidate list for remarks/license column selectors
+extra_cols   = [c for c in df.columns if c.startswith("extra_col")]
+known_static = ["db_id", "teacher_name", "teacher_contact", "comms_contact",
+                "license_region", "cd_name", "cd_remarks"]
+period_prefixes = list(PERIODS.values())
+other_cols = [
+    c for c in df.columns
+    if c not in extra_cols
+    and c not in known_static
+    and not any(c.startswith(k) for k in period_prefixes)
 ]
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**CD Remarks Column**")
-remarks_col = st.sidebar.selectbox("Select column with CD remarks/reasons", all_cols)
+# Auto-select cd_remarks if it was detected from the header
+rem_options  = ["— not mapped —", "cd_remarks"] + extra_cols + other_cols
+rem_default  = 1 if "cd_remarks" in df.columns else 0
+remarks_col  = st.sidebar.selectbox(
+    "Select column with CD remarks/reasons", rem_options, index=rem_default
+)
 remarks_col = None if remarks_col == "— not mapped —" else remarks_col
+if rem_default == 1:
+    st.sidebar.caption("✅ Remarks column auto-detected from your sheet header.")
 
 st.sidebar.markdown("**License/Region Column**")
-license_col = st.sidebar.selectbox("Select column with license/region", all_cols, key="lic")
+# Auto-select license_region if it was detected from the header
+lic_options  = ["— not mapped —", "license_region"] + extra_cols + other_cols
+lic_default  = 1 if "license_region" in df.columns else 0
+license_col  = st.sidebar.selectbox(
+    "Select column with license/region", lic_options, index=lic_default, key="lic"
+)
 license_col = None if license_col == "— not mapped —" else license_col
+if lic_default == 1:
+    st.sidebar.caption("✅ License column auto-detected from your sheet header.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Communications App**")
 comms_app_url = st.sidebar.text_input(
     "Paste your comms app URL here",
     placeholder="https://your-comms-app.streamlit.app",
-    help="Adds a link inside Teacher Profile to open the communications app"
+    help="Adds a link in Teacher Profile to open the communications app"
 )
 
 filtered = df.copy()
@@ -365,7 +403,9 @@ with t1:
     )
 with t2:
     if license_col and license_col in filtered.columns:
-        lic_options = ["All Licenses"] + sorted(filtered[license_col].dropna().unique().tolist())
+        lic_options = ["All Licenses"] + sorted(
+            filtered[license_col].dropna().astype(str).unique().tolist()
+        )
     else:
         lic_options = ["All Licenses"] + LICENSES
     selected_license = st.selectbox("License / Region", lic_options)
@@ -403,7 +443,7 @@ if tot_rows:
     st.plotly_chart(fig_tot, use_container_width=True)
 
 if not license_col:
-    st.info("License breakdown not yet available. Add a 'License' column (NAM/APAC/IME/EUK) to your sheet, then select it in the sidebar.")
+    st.info("License breakdown not yet available. Add a 'License' column (NAM/APAC/IME/EUK) to your sheet — it will be auto-detected.")
 
 st.divider()
 
@@ -652,7 +692,7 @@ if remarks_col and remarks_col in filtered.columns:
 
     st.markdown(f"**{len(rem_df)} teachers with remarks logged ({remarks_period})**")
 
-    # Overall reason frequency chart
+    # Overall reason frequency
     reason_counts = rem_df[remarks_col].value_counts().reset_index()
     reason_counts.columns = ["Reason", "Teachers"]
 
@@ -668,7 +708,7 @@ if remarks_col and remarks_col in filtered.columns:
     )
     st.plotly_chart(fig_rem, use_container_width=True)
 
-    # CD-wise breakdown per reason
+    # CD-wise breakdown — shows which CD's teachers gave each reason
     st.markdown("**Which CD's teachers gave each reason:**")
     cd_reason_df = rem_df.groupby([remarks_col, "cd_name"]).size().reset_index(name="Teachers")
     cd_reason_df.columns = ["Reason", "CD Name", "Teachers"]
@@ -750,9 +790,7 @@ if search:
                         pd.DataFrame(summary), use_container_width=True, hide_index=True
                     )
                     if comms_app_url:
-                        st.markdown(
-                            f"[📨 Open in Communications App]({comms_app_url})"
-                        )
+                        st.markdown(f"[📨 Open in Communications App]({comms_app_url})")
                     else:
                         st.caption("Add your comms app URL in the sidebar to enable this link.")
 
