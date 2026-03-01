@@ -4,7 +4,6 @@ import plotly.express as px
 
 st.set_page_config(page_title="QMath Compliance Analytics", layout="wide", page_icon="📊")
 
-# ── Data structure ───────────────────────────────────────────────────────────
 PERIODS = {
     "Dec 31": "dec31",
     "Jan 27": "jan27",
@@ -31,43 +30,135 @@ RATING_COLORS = {
 
 LICENSES = ["NAM", "APAC", "IME", "EUK"]
 
-# ── Load & rename data ───────────────────────────────────────────────────────
+
 def load_data(file):
     raw = pd.read_csv(file, header=None, dtype=str) if file.name.endswith(".csv") \
           else pd.read_excel(file, header=None, dtype=str)
 
+    # Find the row with column names (contains "DB ID")
     header_row = 0
     for i, row in raw.iterrows():
         if any("db id" in str(v).strip().lower() for v in row.values):
             header_row = i
             break
 
+    col_names_row = raw.iloc[header_row]
+
+    # Row before has period labels — forward-fill for merged/blank cells
+    period_filled = []
+    if header_row > 0:
+        last_p = ""
+        for v in raw.iloc[header_row - 1]:
+            s = str(v).strip()
+            if s and s.lower() not in ["nan", "none", ""]:
+                last_p = s
+            period_filled.append(last_p)
+    else:
+        period_filled = [""] * len(col_names_row)
+
     df = raw.iloc[header_row + 1:].reset_index(drop=True)
 
-    new_cols = ["db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"]
-    for key in PERIODS.values():
-        for s in ["trial_late_login", "class_no_show", "class_late_login",
-                  "trial_no_show", "trial_not_acknowledged", "total_offenses", "rating"]:
-            new_cols.append(f"{key}_{s}")
+    # Period label → key (include both "Dec 31" and "dec31" style)
+    PERIOD_DETECT = {}
+    for label, key in PERIODS.items():
+        PERIOD_DETECT[label.lower()] = key
+        PERIOD_DETECT[key.lower()] = key
+
+    # Offense header keyword → suffix (longer/more specific phrases first to avoid partial matches)
+    OFFENSE_DETECT = [
+        ("trial late login",       "trial_late_login"),
+        ("trial not acknowledged", "trial_not_acknowledged"),
+        ("trial no show",          "trial_no_show"),
+        ("class late login",       "class_late_login"),
+        ("class no show",          "class_no_show"),
+        ("total offense",          "total_offenses"),
+        ("total",                  "total_offenses"),
+        ("rating",                 "rating"),
+    ]
+
+    # Static column keywords (more specific first)
+    STATIC_DETECT = [
+        ("db id",            "db_id"),
+        ("dbid",             "db_id"),
+        ("teacher name",     "teacher_name"),
+        ("comms contact",    "comms_contact"),
+        ("teacher contact",  "teacher_contact"),
+        ("cd name",          "cd_name"),
+        ("cluster director", "cd_name"),
+        ("cluster",          "cd_name"),
+    ]
+
+    new_cols       = []
+    col_map_debug  = []
+
+    for idx in range(len(col_names_row)):
+        col_val    = str(col_names_row.iloc[idx]).strip().lower()
+        period_val = (period_filled[idx] if idx < len(period_filled) else "").lower().strip()
+        orig_col   = str(col_names_row.iloc[idx]).strip()
+        orig_per   = period_filled[idx] if idx < len(period_filled) else ""
+
+        # Try static match first
+        static = None
+        for k, v in STATIC_DETECT:
+            if k in col_val:
+                static = v
+                break
+        if static:
+            new_cols.append(static)
+            col_map_debug.append((orig_col, orig_per, static))
+            continue
+
+        # Get period key from period row
+        period_key_found = None
+        for k, v in PERIOD_DETECT.items():
+            if k in period_val:
+                period_key_found = v
+                break
+
+        # Get offense suffix
+        offense_found = None
+        for k, v in OFFENSE_DETECT:
+            if k in col_val:
+                offense_found = v
+                break
+
+        if period_key_found and offense_found:
+            mapped = f"{period_key_found}_{offense_found}"
+        else:
+            mapped = f"extra_col_{idx}"
+
+        new_cols.append(mapped)
+        col_map_debug.append((orig_col, orig_per, mapped))
+
+    # Fallback to positional mapping if too many columns were not detected
+    extra_count = sum(1 for c in new_cols if c.startswith("extra_col"))
+    if extra_count > len(new_cols) * 0.4:
+        new_cols = ["db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"]
+        for key in PERIODS.values():
+            for s in ["trial_late_login", "class_no_show", "class_late_login",
+                      "trial_no_show", "trial_not_acknowledged", "total_offenses", "rating"]:
+                new_cols.append(f"{key}_{s}")
+        col_map_debug = [(c, "positional fallback", c) for c in new_cols]
 
     while len(new_cols) < len(df.columns):
         new_cols.append(f"extra_col_{len(new_cols)}")
     df.columns = new_cols[:len(df.columns)]
 
+    # Numeric conversion for offense/count columns
     for col in df.columns:
         if "rating" not in col and col not in [
             "db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"
         ] and not col.startswith("extra_col"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Normalize rating values
     for key in PERIODS.values():
-        rcol = f"{key}_rating"
-        if rcol in df.columns:
-            df[rcol] = df[rcol].astype(str).str.strip().str.capitalize()
-            df[rcol] = df[rcol].replace({
-                "Nan": "", "None": "", "Na": "", "Amber": "Orange"
-            })
+        rcol_n = f"{key}_rating"
+        if rcol_n in df.columns:
+            df[rcol_n] = df[rcol_n].astype(str).str.strip().str.capitalize()
+            df[rcol_n] = df[rcol_n].replace({"Nan": "", "None": "", "Na": "", "Amber": "Orange"})
 
+    # Forward-fill blank ratings across periods
     rating_cols = [f"{key}_rating" for key in PERIODS.values() if f"{key}_rating" in df.columns]
     df[rating_cols] = df[rating_cols].replace("", pd.NA)
     df[rating_cols] = df[rating_cols].ffill(axis=1)
@@ -75,7 +166,8 @@ def load_data(file):
 
     df = df.dropna(subset=["teacher_name"])
     df = df[df["teacher_name"].astype(str).str.strip() != ""]
-    return df
+    return df, col_map_debug
+
 
 # ── App ──────────────────────────────────────────────────────────────────────
 st.title("📊 QMath Compliance Analytics")
@@ -84,13 +176,28 @@ uploaded = st.file_uploader(
     "Upload your compliance CSV or Excel file", type=["csv", "xlsx", "xls"]
 )
 if uploaded:
-    st.session_state["df"] = load_data(uploaded)
+    df_loaded, col_debug = load_data(uploaded)
+    st.session_state["df"]        = df_loaded
+    st.session_state["col_debug"] = col_debug
 
 if "df" not in st.session_state:
     st.info("Upload your compliance data above to get started.")
     st.stop()
 
-df = st.session_state["df"]
+df        = st.session_state["df"]
+col_debug = st.session_state.get("col_debug", [])
+
+# Column mapping verification — click to check if offenses are correctly detected
+with st.expander("🔎 Verify Column Mapping — click here to check offense columns are correct"):
+    if col_debug:
+        debug_show = [(o, p, m) for o, p, m in col_debug if not m.startswith("extra_col")]
+        debug_df   = pd.DataFrame(debug_show, columns=["Your Column Header", "Period", "Mapped As"])
+        st.dataframe(debug_df, use_container_width=True, hide_index=True)
+        extra_n = sum(1 for _, _, m in col_debug if m.startswith("extra_col"))
+        if extra_n > 0:
+            st.caption(f"{extra_n} extra/unmapped columns are hidden above.")
+    else:
+        st.info("Upload data to see column mapping.")
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 st.sidebar.header("🔍 Global Filters")
@@ -101,25 +208,29 @@ period_key   = PERIODS[period_label]
 rcol         = f"{period_key}_rating"
 tcol         = f"{period_key}_total_offenses"
 
-# Remarks column selector
+# Remarks & license column selectors
 extra_cols = [c for c in df.columns if c.startswith("extra_col")]
 all_cols   = ["— not mapped —"] + extra_cols + [
     c for c in df.columns if c not in extra_cols and not any(
         c.startswith(k) for k in list(PERIODS.values())
-    ) and c not in ["db_id","teacher_name","teacher_contact","comms_contact","cd_name"]
+    ) and c not in ["db_id", "teacher_name", "teacher_contact", "comms_contact", "cd_name"]
 ]
 st.sidebar.markdown("---")
 st.sidebar.markdown("**CD Remarks Column**")
-remarks_col = st.sidebar.selectbox(
-    "Select column with CD remarks/reasons", all_cols
-)
+remarks_col = st.sidebar.selectbox("Select column with CD remarks/reasons", all_cols)
 remarks_col = None if remarks_col == "— not mapped —" else remarks_col
 
 st.sidebar.markdown("**License/Region Column**")
-license_col = st.sidebar.selectbox(
-    "Select column with license/region", all_cols, key="lic"
-)
+license_col = st.sidebar.selectbox("Select column with license/region", all_cols, key="lic")
 license_col = None if license_col == "— not mapped —" else license_col
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Communications App**")
+comms_app_url = st.sidebar.text_input(
+    "Paste your comms app URL here",
+    placeholder="https://your-comms-app.streamlit.app",
+    help="Adds a link inside Teacher Profile to open the communications app"
+)
 
 filtered = df.copy()
 if selected_cd != "All CDs":
@@ -150,8 +261,7 @@ st.divider()
 st.subheader("🆕 Recent Offenses")
 st.caption("Shows new offenses added between a selected base period and Live data.")
 
-period_keys_list   = list(PERIODS.keys())
-period_values_list = list(PERIODS.values())
+period_keys_list = list(PERIODS.keys())
 
 r1, r2, r3 = st.columns([2, 2, 2])
 with r1:
@@ -168,7 +278,6 @@ with r3:
 
 base_key = PERIODS[base_period_label]
 
-# Calculate delta for each offense type
 delta_df = filtered.copy()
 for label, suffix in OFFENSE_DISPLAY.items():
     live_col = f"live_{suffix}"
@@ -186,7 +295,6 @@ if recent_suffix_cols:
     delta_df["recent_total"] = delta_df[recent_suffix_cols].sum(axis=1)
     recent_teachers = delta_df[delta_df["recent_total"] >= min_recent].copy()
 
-    # Apply offense type filter — keep only teachers with offense in selected types
     if recent_offense_filter:
         selected_suffixes = [OFFENSE_DISPLAY[o] for o in recent_offense_filter
                              if o in OFFENSE_DISPLAY]
@@ -197,9 +305,8 @@ if recent_suffix_cols:
     ra, rb, rc_ = st.columns(3)
     ra.metric("Total Recent Offenses", int(recent_teachers["recent_total"].sum()))
     rb.metric("Unique Teachers Affected", len(recent_teachers))
-    rc_.metric(f"Base Period", base_period_label)
+    rc_.metric("Base Period", base_period_label)
 
-    # Offense split summary
     split_rows = []
     for label, suffix in OFFENSE_DISPLAY.items():
         col = f"recent_{suffix}"
@@ -222,7 +329,6 @@ if recent_suffix_cols:
         )
         st.plotly_chart(fig_recent, use_container_width=True)
 
-    # Teacher list for recent offenses
     st.markdown(f"**Teacher List — Recent Offenses ({base_period_label} → Live)**")
     show_recent = ["db_id", "teacher_name", "cd_name", rcol, "recent_total"]
     rename_recent = {
@@ -268,7 +374,6 @@ tot_df = filtered.copy()
 if license_col and license_col in tot_df.columns and selected_license != "All Licenses":
     tot_df = tot_df[tot_df[license_col] == selected_license]
 
-# Build summary table
 tot_rows = []
 for label, suffix in OFFENSE_DISPLAY.items():
     if label not in offense_type_filter:
@@ -439,7 +544,7 @@ hist_cols  = ["db_id", "teacher_name", "cd_name"]
 hist_remap = {"db_id": "DB ID", "teacher_name": "Teacher", "cd_name": "CD"}
 
 for label, key in PERIODS.items():
-    tc = f"{key}_total_offenses"
+    tc  = f"{key}_total_offenses"
     rc2 = f"{key}_rating"
     if tc in filtered.columns:
         hist_cols.append(tc)
@@ -457,7 +562,7 @@ st.dataframe(
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — CD Performance (Clickable, % or Count)
+# SECTION 8 — CD Performance (Clickable)
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("👥 Cluster Director Performance")
 st.caption("Click any CD bar to see all their teachers.")
@@ -547,6 +652,7 @@ if remarks_col and remarks_col in filtered.columns:
 
     st.markdown(f"**{len(rem_df)} teachers with remarks logged ({remarks_period})**")
 
+    # Overall reason frequency chart
     reason_counts = rem_df[remarks_col].value_counts().reset_index()
     reason_counts.columns = ["Reason", "Teachers"]
 
@@ -561,6 +667,25 @@ if remarks_col and remarks_col in filtered.columns:
         yaxis=dict(autorange="reversed"), height=max(300, len(reason_counts) * 40)
     )
     st.plotly_chart(fig_rem, use_container_width=True)
+
+    # CD-wise breakdown per reason
+    st.markdown("**Which CD's teachers gave each reason:**")
+    cd_reason_df = rem_df.groupby([remarks_col, "cd_name"]).size().reset_index(name="Teachers")
+    cd_reason_df.columns = ["Reason", "CD Name", "Teachers"]
+    cd_reason_df = cd_reason_df.sort_values(["Reason", "Teachers"], ascending=[True, False])
+
+    fig_cd_rem = px.bar(
+        cd_reason_df, x="Teachers", y="Reason", color="CD Name",
+        orientation="h", barmode="stack",
+        labels={"Reason": "Offense Reason", "CD Name": "Cluster Director"},
+        height=max(350, len(cd_reason_df["Reason"].unique()) * 50),
+    )
+    fig_cd_rem.update_layout(
+        xaxis_title="Number of Teachers",
+        yaxis=dict(autorange="reversed"),
+        legend_title="CD Name",
+    )
+    st.plotly_chart(fig_cd_rem, use_container_width=True)
 
     # Drill into a specific reason
     reason_select = st.selectbox(
@@ -624,6 +749,12 @@ if search:
                     st.dataframe(
                         pd.DataFrame(summary), use_container_width=True, hide_index=True
                     )
+                    if comms_app_url:
+                        st.markdown(
+                            f"[📨 Open in Communications App]({comms_app_url})"
+                        )
+                    else:
+                        st.caption("Add your comms app URL in the sidebar to enable this link.")
 
                 with col_b:
                     st.markdown("**Live offense breakdown:**")
