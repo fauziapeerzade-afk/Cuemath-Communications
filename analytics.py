@@ -48,6 +48,9 @@ def load_data(file):
                   "trial_no_show", "trial_not_acknowledged", "total_offenses", "rating"]:
             new_cols.append(f"{key}_{s}")
 
+    # Pad new_cols if CSV has more columns than expected
+    while len(new_cols) < len(df.columns):
+        new_cols.append(f"extra_col_{len(new_cols)}")
     df.columns = new_cols[:len(df.columns)]
 
     for col in df.columns:
