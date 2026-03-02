@@ -331,20 +331,27 @@ with tab2:
         st.caption("Search by teacher name or DBID to see all their offenses and CD notes.")
         search = st.text_input("Search", placeholder="Type a name or DBID...")
 
-        display_cols = [col_map["name"]]
+        display_cols_raw = [col_map["name"]]
         if col_map.get("dbid"):
-            display_cols.append(col_map["dbid"])
-        display_cols.append(col_map["phone"])
-        display_cols.append(col_map["offense"])
-        display_cols.append(col_map["date"])
+            display_cols_raw.append(col_map["dbid"])
+        display_cols_raw.append(col_map["phone"])
+        display_cols_raw.append(col_map["offense"])
+        display_cols_raw.append(col_map["date"])
         if col_map.get("cd"):
-            display_cols.append(col_map["cd"])
+            display_cols_raw.append(col_map["cd"])
         if col_map.get("cd_connected"):
-            display_cols.append(col_map["cd_connected"])
+            display_cols_raw.append(col_map["cd_connected"])
         if col_map.get("reason_cat"):
-            display_cols.append(col_map["reason_cat"])
+            display_cols_raw.append(col_map["reason_cat"])
         if col_map.get("reason_notes"):
-            display_cols.append(col_map["reason_notes"])
+            display_cols_raw.append(col_map["reason_notes"])
+        # Deduplicate while preserving order, and only keep columns that exist
+        seen_cols = set()
+        display_cols = []
+        for c in display_cols_raw:
+            if c not in seen_cols and c in filtered_dash.columns:
+                seen_cols.add(c)
+                display_cols.append(c)
 
         if search:
             name_match = filtered_dash[col_map["name"]].astype(str).str.contains(search, case=False, na=False)
@@ -356,8 +363,9 @@ with tab2:
         else:
             result = filtered_dash
 
+        sort_col = col_map["date"] if col_map["date"] in display_cols else display_cols[0]
         st.dataframe(
-            result[display_cols].sort_values(col_map["date"], ascending=False),
+            result[display_cols].sort_values(sort_col, ascending=False),
             use_container_width=True
         )
         st.caption(f"Showing {len(result)} offense record(s)")
