@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-st.set_page_config(page_title="QMath Compliance Analytics", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Cuemath Compliance Analytics", layout="wide", page_icon="📊")
 
 PERIODS = {
     "Dec 31": "dec31",
@@ -189,7 +189,7 @@ def load_data(file):
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
-st.title("📊 QMath Compliance Analytics")
+st.title("📊 Cuemath Compliance Analytics")
 
 uploaded = st.file_uploader(
     "Upload your compliance CSV or Excel file", type=["csv", "xlsx", "xls"]
@@ -290,6 +290,95 @@ if rcol in filtered.columns:
     k3.metric("🟠 Orange", int(rc.get("orange", 0)))
     k4.metric("🟡 Yellow", int(rc.get("yellow", 0)))
     k5.metric("🟢 Green",  int(rc.get("green",  0)))
+
+st.divider()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 1.5 — Export for Messaging (feeds into the Communications App)
+# ════════════════════════════════════════════════════════════════════════════
+with st.expander("📨 Download Teacher List for Communications App", expanded=False):
+    st.caption(
+        "Filter the teachers you want to message, then download a CSV that you can "
+        "upload directly into the Communications App."
+    )
+    ex1, ex2, ex3 = st.columns([2, 2, 2])
+    with ex1:
+        export_ratings = st.multiselect(
+            "Filter by Rating",
+            ["Red", "Orange", "Yellow", "Green"],
+            default=["Red", "Orange"],
+            key="exp_ratings"
+        )
+    with ex2:
+        export_offenses = st.multiselect(
+            "Filter by Offense Type",
+            list(OFFENSE_DISPLAY.keys()),
+            default=list(OFFENSE_DISPLAY.keys()),
+            key="exp_offenses"
+        )
+    with ex3:
+        export_min = st.number_input(
+            "Min offense count per type", min_value=1, value=1, step=1, key="exp_min"
+        )
+
+    export_df = filtered.copy()
+    if export_ratings and rcol in export_df.columns:
+        export_df = export_df[export_df[rcol].isin(export_ratings)]
+
+    # Build one row per teacher per offense type (where count >= min)
+    export_rows = []
+    for _, row in export_df.iterrows():
+        for offense_label, suffix in OFFENSE_DISPLAY.items():
+            if offense_label not in export_offenses:
+                continue
+            col = f"{period_key}_{suffix}"
+            val = row.get(col, 0)
+            try:
+                val = float(val) if pd.notna(val) else 0
+            except Exception:
+                val = 0
+            if val >= export_min:
+                phone = str(row.get("teacher_contact", "")).strip()
+                export_rows.append({
+                    "DB ID":        row.get("db_id", ""),
+                    "Teacher Name": row.get("teacher_name", ""),
+                    "Phone Number": phone,
+                    "CD Name":      row.get("cd_name", ""),
+                    "Offense Type": offense_label,
+                    "Offense Count": int(val),
+                    "Period":       period_label,
+                    "Rating":       row.get(rcol, ""),
+                })
+
+    if export_rows:
+        export_out = pd.DataFrame(export_rows)
+        st.success(
+            f"**{len(export_out)} rows** ready — {export_out['Teacher Name'].nunique()} "
+            f"unique teachers across {len(export_offenses)} offense type(s)."
+        )
+        st.dataframe(export_out.head(20), use_container_width=True, hide_index=True)
+        if len(export_out) > 20:
+            st.caption(f"Showing first 20 of {len(export_out)} rows.")
+
+        csv_bytes = export_out.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Download CSV for Communications App",
+            data=csv_bytes,
+            file_name=f"teachers_for_messaging_{period_label.replace(' ', '_')}.csv",
+            mime="text/csv",
+        )
+
+        if comms_app_url:
+            st.markdown(
+                f"Once downloaded, open your **[Communications App]({comms_app_url})**, "
+                f"upload this file, map: **Teacher Name → Teacher Name**, "
+                f"**Phone Number → Phone Number**, **Offense Type → Offense Type**, "
+                f"**Period → Offense Date**, **CD Name → Cluster Director**, then send."
+            )
+        else:
+            st.info("Paste your Communications App URL in the sidebar to get a direct link here.")
+    else:
+        st.warning("No teachers match the current export filters.")
 
 st.divider()
 

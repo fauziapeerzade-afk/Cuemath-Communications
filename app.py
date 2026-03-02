@@ -4,7 +4,7 @@ import plotly.express as px
 from twilio.rest import Client
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="QMath Communications", layout="wide", page_icon="📢")
+st.set_page_config(page_title="Cuemath Communications", layout="wide", page_icon="📢")
 
 # ── Twilio credentials ──────────────────────────────────────────────────────
 try:
@@ -44,7 +44,7 @@ DEFAULT_TEMPLATES = {
 BRAND_COLOR = "#FF4B4B"
 
 # ── App header ───────────────────────────────────────────────────────────────
-st.title("📢 QMath Teacher Communications Dashboard")
+st.title("📢 Cuemath Teacher Communications Dashboard")
 tab1, tab2, tab3, tab4 = st.tabs([
     "📁 Upload Data",
     "📊 Analytics Dashboard",
