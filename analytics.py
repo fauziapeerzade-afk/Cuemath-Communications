@@ -30,12 +30,23 @@ RATING_COLORS = {
 
 LICENSES = ["NAM", "APAC", "IME", "EUK"]
 
+# Standard CD reason categories — your CDs should log one of these
+REASON_CATEGORIES = [
+    "Personal Reason",
+    "Internet Issue",
+    "Teacher Lapse",
+    "Technical Issue",
+    "Emergency / Health",
+    "Student No Show",
+    "System Error",
+    "Other",
+]
+
 
 def load_data(file):
     raw = pd.read_csv(file, header=None, dtype=str) if file.name.endswith(".csv") \
           else pd.read_excel(file, header=None, dtype=str)
 
-    # Find the row with column names (contains "DB ID")
     header_row = 0
     for i, row in raw.iterrows():
         if any("db id" in str(v).strip().lower() for v in row.values):
@@ -44,7 +55,6 @@ def load_data(file):
 
     col_names_row = raw.iloc[header_row]
 
-    # Row before has period labels — forward-fill for merged/blank cells
     period_filled = []
     if header_row > 0:
         last_p = ""
@@ -58,13 +68,11 @@ def load_data(file):
 
     df = raw.iloc[header_row + 1:].reset_index(drop=True)
 
-    # Period label → key (both "Dec 31" and "dec31" style)
     PERIOD_DETECT = {}
     for label, key in PERIODS.items():
         PERIOD_DETECT[label.lower()] = key
         PERIOD_DETECT[key.lower()]   = key
 
-    # Offense header keyword → suffix (longer/specific phrases first to avoid partial matches)
     OFFENSE_DETECT = [
         ("trial late login",       "trial_late_login"),
         ("trial not acknowledged", "trial_not_acknowledged"),
@@ -76,21 +84,17 @@ def load_data(file):
         ("rating",                 "rating"),
     ]
 
-    # Static column keywords — more specific first.
-    # Includes licence, remarks, reasons so they are auto-detected and never
-    # shift the offset of the CD Name and period columns that follow them.
     STATIC_DETECT = [
         ("db id",            "db_id"),
         ("dbid",             "db_id"),
         ("teacher name",     "teacher_name"),
         ("comms contact",    "comms_contact"),
         ("teacher contact",  "teacher_contact"),
-        ("licence",          "license_region"),   # British spelling
-        ("license",          "license_region"),   # American spelling
+        ("licence",          "license_region"),
+        ("license",          "license_region"),
         ("cd name",          "cd_name"),
         ("cluster director", "cd_name"),
         ("cluster",          "cd_name"),
-        # Remarks / reasons — any of these keywords auto-map to cd_remarks
         ("cd remark",        "cd_remarks"),
         ("remark",           "cd_remarks"),
         ("miss reason",      "cd_remarks"),
@@ -110,7 +114,6 @@ def load_data(file):
         orig_col   = str(col_names_row.iloc[idx]).strip()
         orig_per   = period_filled[idx] if idx < len(period_filled) else ""
 
-        # Try static match first (catches DB ID, Teacher Name, Licence, CD Name, etc.)
         static = None
         for k, v in STATIC_DETECT:
             if k in col_val:
@@ -121,14 +124,12 @@ def load_data(file):
             col_map_debug.append((orig_col, orig_per, static))
             continue
 
-        # Get period key from the period header row
         period_key_found = None
         for k, v in PERIOD_DETECT.items():
             if k in period_val:
                 period_key_found = v
                 break
 
-        # Get offense suffix from the column name
         offense_found = None
         for k, v in OFFENSE_DETECT:
             if k in col_val:
@@ -143,8 +144,6 @@ def load_data(file):
         new_cols.append(mapped)
         col_map_debug.append((orig_col, orig_per, mapped))
 
-    # Positional fallback — used when headers cannot be read (e.g. blank header row).
-    # Structure: DB ID | Teacher Name | Teacher Contact | Comms Contact | Licence | CD Name | [periods] | Remarks
     extra_count = sum(1 for c in new_cols if c.startswith("extra_col"))
     if extra_count > len(new_cols) * 0.4:
         new_cols = [
@@ -162,22 +161,19 @@ def load_data(file):
         new_cols.append(f"extra_col_{len(new_cols)}")
     df.columns = new_cols[:len(df.columns)]
 
-    # Numeric conversion for offense/count columns
     for col in df.columns:
         if "rating" not in col and col not in [
             "db_id", "teacher_name", "teacher_contact",
-            "comms_contact", "license_region", "cd_name",
+            "comms_contact", "license_region", "cd_name", "cd_remarks",
         ] and not col.startswith("extra_col"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Normalize rating values
     for key in PERIODS.values():
         rcol_n = f"{key}_rating"
         if rcol_n in df.columns:
             df[rcol_n] = df[rcol_n].astype(str).str.strip().str.capitalize()
             df[rcol_n] = df[rcol_n].replace({"Nan": "", "None": "", "Na": "", "Amber": "Orange"})
 
-    # Forward-fill blank ratings across periods
     rating_cols = [f"{key}_rating" for key in PERIODS.values() if f"{key}_rating" in df.columns]
     df[rating_cols] = df[rating_cols].replace("", pd.NA)
     df[rating_cols] = df[rating_cols].ffill(axis=1)
@@ -188,26 +184,52 @@ def load_data(file):
     return df, col_map_debug
 
 
-# ── App ──────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# App Header
+# ════════════════════════════════════════════════════════════════════════════
 st.title("📊 Cuemath Compliance Analytics")
+st.caption("Upload your compliance data below, set your filters in the sidebar, and click Apply.")
 
-uploaded = st.file_uploader(
-    "Upload your compliance CSV or Excel file", type=["csv", "xlsx", "xls"]
-)
-if uploaded:
-    df_loaded, col_debug = load_data(uploaded)
-    st.session_state["df"]        = df_loaded
-    st.session_state["col_debug"] = col_debug
+# ── File Uploaders ────────────────────────────────────────────────────────────
+up1, up2 = st.columns(2)
+
+with up1:
+    st.markdown("#### 📂 Active Compliance Data")
+    uploaded = st.file_uploader(
+        "Upload weekly compliance CSV or Excel",
+        type=["csv", "xlsx", "xls"],
+        key="main_upload",
+        help="This is your main compliance tracker — one row per teacher."
+    )
+    if uploaded:
+        df_loaded, col_debug = load_data(uploaded)
+        st.session_state["df"]        = df_loaded
+        st.session_state["col_debug"] = col_debug
+        st.success(f"✅ {len(df_loaded)} teachers loaded.")
+
+with up2:
+    st.markdown("#### 📂 Reverted / Deleted Cases *(optional)*")
+    rev_uploaded = st.file_uploader(
+        "Upload reversed compliance CSV or Excel",
+        type=["csv", "xlsx", "xls"],
+        key="rev_upload",
+        help="Cases that were reversed or deleted. Same format as your active compliance file."
+    )
+    if rev_uploaded:
+        rev_loaded, _ = load_data(rev_uploaded)
+        st.session_state["reverted_df"] = rev_loaded
+        st.success(f"✅ {len(rev_loaded)} reverted records loaded.")
 
 if "df" not in st.session_state:
-    st.info("Upload your compliance data above to get started.")
+    st.info("👆 Upload your active compliance data above to get started.")
     st.stop()
 
-df        = st.session_state["df"]
-col_debug = st.session_state.get("col_debug", [])
+df          = st.session_state["df"]
+col_debug   = st.session_state.get("col_debug", [])
+reverted_df = st.session_state.get("reverted_df", None)
 
-# Column mapping verification expander — use this to confirm offenses are detected correctly
-with st.expander("🔎 Verify Column Mapping — click to check offense columns are correctly detected"):
+# Column mapping verification
+with st.expander("🔎 Verify Column Mapping — click to confirm offense types are detected correctly"):
     if col_debug:
         debug_show = [(o, p, m) for o, p, m in col_debug if not m.startswith("extra_col")]
         debug_df   = pd.DataFrame(debug_show, columns=["Your Column Header", "Period", "Mapped As"])
@@ -215,66 +237,63 @@ with st.expander("🔎 Verify Column Mapping — click to check offense columns 
         extra_n = sum(1 for _, _, m in col_debug if m.startswith("extra_col"))
         if extra_n > 0:
             st.caption(f"{extra_n} extra/unmapped columns hidden above.")
-    else:
-        st.info("Upload data to see column mapping.")
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-st.sidebar.header("🔍 Global Filters")
-cd_list      = ["All CDs"] + sorted(df["cd_name"].dropna().unique().tolist())
-selected_cd  = st.sidebar.selectbox("Cluster Director", cd_list)
-period_label = st.sidebar.selectbox("View Period", list(PERIODS.keys()), index=5)
-period_key   = PERIODS[period_label]
-rcol         = f"{period_key}_rating"
-tcol         = f"{period_key}_total_offenses"
+st.divider()
 
-# Build candidate list for remarks/license column selectors
-extra_cols   = [c for c in df.columns if c.startswith("extra_col")]
-known_static = ["db_id", "teacher_name", "teacher_contact", "comms_contact",
-                "license_region", "cd_name", "cd_remarks"]
+# ════════════════════════════════════════════════════════════════════════════
+# Sidebar — Filters (form with Apply button) + Settings
+# ════════════════════════════════════════════════════════════════════════════
+st.sidebar.header("🔍 Filters")
+st.sidebar.caption("Select your filters then click **Apply**.")
+
+cd_list = ["All CDs"] + sorted(df["cd_name"].dropna().unique().tolist())
+
+with st.sidebar.form("global_filters"):
+    selected_cd  = st.selectbox("Cluster Director", cd_list)
+    period_label = st.selectbox("View Period", list(PERIODS.keys()), index=5)
+    st.form_submit_button("✅ Apply Filters", use_container_width=True)
+
+period_key = PERIODS[period_label]
+rcol       = f"{period_key}_rating"
+tcol       = f"{period_key}_total_offenses"
+
+# Column settings (outside form — these are one-time setup)
+extra_cols      = [c for c in df.columns if c.startswith("extra_col")]
+known_static    = ["db_id", "teacher_name", "teacher_contact", "comms_contact",
+                   "license_region", "cd_name", "cd_remarks"]
 period_prefixes = list(PERIODS.values())
-other_cols = [
+other_cols      = [
     c for c in df.columns
-    if c not in extra_cols
-    and c not in known_static
+    if c not in extra_cols and c not in known_static
     and not any(c.startswith(k) for k in period_prefixes)
 ]
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**CD Remarks Column**")
-# Auto-select cd_remarks if it was detected from the header
-rem_options  = ["— not mapped —", "cd_remarks"] + extra_cols + other_cols
-rem_default  = 1 if "cd_remarks" in df.columns else 0
-remarks_col  = st.sidebar.selectbox(
-    "Select column with CD remarks/reasons", rem_options, index=rem_default
-)
+st.sidebar.markdown("**⚙️ Column Settings**")
+
+rem_options = ["— not mapped —", "cd_remarks"] + extra_cols + other_cols
+rem_default = 1 if "cd_remarks" in df.columns else 0
+remarks_col = st.sidebar.selectbox("CD Remarks Column", rem_options, index=rem_default)
 remarks_col = None if remarks_col == "— not mapped —" else remarks_col
 if rem_default == 1:
-    st.sidebar.caption("✅ Remarks column auto-detected from your sheet header.")
+    st.sidebar.caption("✅ Auto-detected from your sheet.")
 
-st.sidebar.markdown("**License/Region Column**")
-# Auto-select license_region if it was detected from the header
-lic_options  = ["— not mapped —", "license_region"] + extra_cols + other_cols
-lic_default  = 1 if "license_region" in df.columns else 0
-license_col  = st.sidebar.selectbox(
-    "Select column with license/region", lic_options, index=lic_default, key="lic"
-)
+lic_options = ["— not mapped —", "license_region"] + extra_cols + other_cols
+lic_default = 1 if "license_region" in df.columns else 0
+license_col = st.sidebar.selectbox("License / Region Column", lic_options, index=lic_default, key="lic")
 license_col = None if license_col == "— not mapped —" else license_col
 if lic_default == 1:
-    st.sidebar.caption("✅ License column auto-detected from your sheet header.")
+    st.sidebar.caption("✅ Auto-detected from your sheet.")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Communications App**")
 comms_app_url = st.sidebar.text_input(
-    "Paste your comms app URL here",
-    placeholder="https://your-comms-app.streamlit.app",
-    help="Adds a link in Teacher Profile to open the communications app"
+    "📨 Communications App URL",
+    placeholder="https://your-comms-app.streamlit.app"
 )
 
 filtered = df.copy()
 if selected_cd != "All CDs":
     filtered = filtered[filtered["cd_name"] == selected_cd]
-
-st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — Overview KPIs
@@ -294,13 +313,77 @@ if rcol in filtered.columns:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 1.5 — Export for Messaging (feeds into the Communications App)
+# SECTION 2 — Reverted Compliance Comparison
+# ════════════════════════════════════════════════════════════════════════════
+if reverted_df is not None:
+    st.subheader("🔄 Active vs Reverted Compliance — Period Comparison")
+    st.caption("Compares how many teachers had active cases vs how many were reversed each period.")
+
+    rev_filtered = reverted_df.copy()
+    if selected_cd != "All CDs" and "cd_name" in rev_filtered.columns:
+        rev_filtered = rev_filtered[rev_filtered["cd_name"] == selected_cd]
+
+    # Build period-by-period comparison
+    comp_rows = []
+    for label, key in PERIODS.items():
+        act_col = f"{key}_total_offenses"
+        active  = int((filtered[act_col].fillna(0) > 0).sum()) if act_col in filtered.columns else 0
+        reverted = int((rev_filtered[act_col].fillna(0) > 0).sum()) if act_col in rev_filtered.columns else 0
+        comp_rows.append({"Period": label, "Active Cases": active, "Reverted Cases": reverted})
+
+    comp_df = pd.DataFrame(comp_rows)
+    total_active   = int(comp_df["Active Cases"].sum())
+    total_reverted = int(comp_df["Reverted Cases"].sum())
+    total_all      = total_active + total_reverted
+    rev_rate       = round(total_reverted / total_all * 100, 1) if total_all > 0 else 0
+
+    ck1, ck2, ck3 = st.columns(3)
+    ck1.metric("Total Active Cases",   total_active)
+    ck2.metric("Total Reverted Cases", total_reverted)
+    ck3.metric("Overall Reversal Rate", f"{rev_rate}%")
+
+    fig_comp = px.bar(
+        comp_df.melt(id_vars="Period", value_vars=["Active Cases", "Reverted Cases"],
+                     var_name="Type", value_name="Count"),
+        x="Period", y="Count", color="Type", barmode="group", text="Count",
+        color_discrete_map={"Active Cases": "#e74c3c", "Reverted Cases": "#2ecc71"},
+    )
+    fig_comp.update_traces(textposition="outside")
+    fig_comp.update_layout(xaxis_title="", yaxis_title="Number of Teachers",
+                           legend_title="", hovermode="x unified")
+    st.plotly_chart(fig_comp, use_container_width=True)
+
+    # Offense type reversal breakdown for selected period
+    st.markdown(f"**Reversal breakdown by Offense Type — {period_label}:**")
+    rev_off_rows = []
+    for label, suffix in OFFENSE_DISPLAY.items():
+        col = f"{period_key}_{suffix}"
+        if col in rev_filtered.columns:
+            rev_off_rows.append({
+                "Offense Type":    label,
+                "Reverted Count":  int(rev_filtered[col].fillna(0).sum()),
+                "Teachers":        int((rev_filtered[col].fillna(0) > 0).sum()),
+            })
+    if rev_off_rows:
+        rev_off_df = pd.DataFrame(rev_off_rows).sort_values("Reverted Count", ascending=False)
+        fig_rev_off = px.bar(
+            rev_off_df, x="Reverted Count", y="Offense Type", orientation="h",
+            color="Reverted Count", color_continuous_scale=["#a8e6cf", "#2ecc71"],
+            text="Reverted Count",
+        )
+        fig_rev_off.update_traces(textposition="outside")
+        fig_rev_off.update_layout(coloraxis_showscale=False, height=280,
+                                  xaxis_title="Number of Reverted Cases")
+        st.plotly_chart(fig_rev_off, use_container_width=True)
+
+    st.divider()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — Export for Messaging
 # ════════════════════════════════════════════════════════════════════════════
 with st.expander("📨 Download Teacher List for Communications App", expanded=False):
-    st.caption(
-        "Filter the teachers you want to message, then download a CSV that you can "
-        "upload directly into the Communications App."
-    )
+    st.caption("Filter the teachers you want to message, then download a CSV ready to upload to the Communications App.")
+
     ex1, ex2, ex3 = st.columns([2, 2, 2])
     with ex1:
         export_ratings = st.multiselect(
@@ -325,41 +408,37 @@ with st.expander("📨 Download Teacher List for Communications App", expanded=F
     if export_ratings and rcol in export_df.columns:
         export_df = export_df[export_df[rcol].isin(export_ratings)]
 
-    # Build one row per teacher per offense type (where count >= min)
     export_rows = []
     for _, row in export_df.iterrows():
         for offense_label, suffix in OFFENSE_DISPLAY.items():
             if offense_label not in export_offenses:
                 continue
             col = f"{period_key}_{suffix}"
-            val = row.get(col, 0)
             try:
-                val = float(val) if pd.notna(val) else 0
+                val = float(row.get(col, 0)) if pd.notna(row.get(col, 0)) else 0
             except Exception:
                 val = 0
             if val >= export_min:
-                phone = str(row.get("teacher_contact", "")).strip()
                 export_rows.append({
-                    "DB ID":        row.get("db_id", ""),
-                    "Teacher Name": row.get("teacher_name", ""),
-                    "Phone Number": phone,
-                    "CD Name":      row.get("cd_name", ""),
-                    "Offense Type": offense_label,
+                    "DB ID":         row.get("db_id", ""),
+                    "Teacher Name":  row.get("teacher_name", ""),
+                    "Phone Number":  str(row.get("teacher_contact", "")).strip(),
+                    "CD Name":       row.get("cd_name", ""),
+                    "Offense Type":  offense_label,
                     "Offense Count": int(val),
-                    "Period":       period_label,
-                    "Rating":       row.get(rcol, ""),
+                    "Period":        period_label,
+                    "Rating":        row.get(rcol, ""),
                 })
 
     if export_rows:
         export_out = pd.DataFrame(export_rows)
         st.success(
-            f"**{len(export_out)} rows** ready — {export_out['Teacher Name'].nunique()} "
-            f"unique teachers across {len(export_offenses)} offense type(s)."
+            f"**{len(export_out)} rows** ready — "
+            f"{export_out['Teacher Name'].nunique()} unique teachers."
         )
         st.dataframe(export_out.head(20), use_container_width=True, hide_index=True)
         if len(export_out) > 20:
             st.caption(f"Showing first 20 of {len(export_out)} rows.")
-
         csv_bytes = export_out.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="⬇️ Download CSV for Communications App",
@@ -367,41 +446,38 @@ with st.expander("📨 Download Teacher List for Communications App", expanded=F
             file_name=f"teachers_for_messaging_{period_label.replace(' ', '_')}.csv",
             mime="text/csv",
         )
-
         if comms_app_url:
             st.markdown(
                 f"Once downloaded, open your **[Communications App]({comms_app_url})**, "
-                f"upload this file, map: **Teacher Name → Teacher Name**, "
-                f"**Phone Number → Phone Number**, **Offense Type → Offense Type**, "
-                f"**Period → Offense Date**, **CD Name → Cluster Director**, then send."
+                f"upload this file, map the columns, and send."
             )
-        else:
-            st.info("Paste your Communications App URL in the sidebar to get a direct link here.")
     else:
         st.warning("No teachers match the current export filters.")
 
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — Recent Offenses (Delta Analysis)
+# SECTION 4 — Recent Offenses (Delta)
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("🆕 Recent Offenses")
-st.caption("Shows new offenses added between a selected base period and Live data.")
+st.caption("New offenses added between a base period and Live. Use this to identify who needs immediate action.")
 
 period_keys_list = list(PERIODS.keys())
 
-r1, r2, r3 = st.columns([2, 2, 2])
-with r1:
-    base_period_label = st.selectbox(
-        "Compare Live from:", [p for p in period_keys_list if p != "Live"], index=4
-    )
-with r2:
-    recent_offense_filter = st.multiselect(
-        "Filter by Offense Type", list(OFFENSE_DISPLAY.keys()),
-        default=list(OFFENSE_DISPLAY.keys())
-    )
-with r3:
-    min_recent = st.selectbox("Min recent offenses per teacher", [1, 2, 3, 4, 5], index=0)
+with st.form("recent_offense_filters"):
+    r1, r2, r3 = st.columns([2, 2, 2])
+    with r1:
+        base_period_label = st.selectbox(
+            "Compare Live from:", [p for p in period_keys_list if p != "Live"], index=4
+        )
+    with r2:
+        recent_offense_filter = st.multiselect(
+            "Offense Type", list(OFFENSE_DISPLAY.keys()),
+            default=list(OFFENSE_DISPLAY.keys())
+        )
+    with r3:
+        min_recent = st.selectbox("Min recent offenses", [1, 2, 3, 4, 5], index=0)
+    st.form_submit_button("🔍 Apply", use_container_width=False)
 
 base_key = PERIODS[base_period_label]
 
@@ -423,14 +499,13 @@ if recent_suffix_cols:
     recent_teachers = delta_df[delta_df["recent_total"] >= min_recent].copy()
 
     if recent_offense_filter:
-        selected_suffixes = [OFFENSE_DISPLAY[o] for o in recent_offense_filter
-                             if o in OFFENSE_DISPLAY]
+        selected_suffixes = [OFFENSE_DISPLAY[o] for o in recent_offense_filter if o in OFFENSE_DISPLAY]
         mask = delta_df[[f"recent_{s}" for s in selected_suffixes
                          if f"recent_{s}" in delta_df.columns]].sum(axis=1) >= min_recent
         recent_teachers = delta_df[mask].copy()
 
     ra, rb, rc_ = st.columns(3)
-    ra.metric("Total Recent Offenses", int(recent_teachers["recent_total"].sum()))
+    ra.metric("Total Recent Offenses",   int(recent_teachers["recent_total"].sum()))
     rb.metric("Unique Teachers Affected", len(recent_teachers))
     rc_.metric("Base Period", base_period_label)
 
@@ -456,8 +531,8 @@ if recent_suffix_cols:
         )
         st.plotly_chart(fig_recent, use_container_width=True)
 
-    st.markdown(f"**Teacher List — Recent Offenses ({base_period_label} → Live)**")
-    show_recent = ["db_id", "teacher_name", "cd_name", rcol, "recent_total"]
+    st.markdown(f"**Teacher List — {base_period_label} → Live**")
+    show_recent  = ["db_id", "teacher_name", "cd_name", rcol, "recent_total"]
     rename_recent = {
         "db_id": "DB ID", "teacher_name": "Teacher Name", "cd_name": "CD",
         rcol: "Current Rating", "recent_total": "Recent Offenses",
@@ -478,26 +553,27 @@ if recent_suffix_cols:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — Total Offenses Table
+# SECTION 5 — Total Offenses Breakdown
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("📋 Total Offenses Breakdown")
 
-t1, t2 = st.columns([2, 2])
-with t1:
-    offense_type_filter = st.multiselect(
-        "Filter by Offense Type",
-        list(OFFENSE_DISPLAY.keys()),
-        default=list(OFFENSE_DISPLAY.keys()),
-        key="tot_off_filter"
-    )
-with t2:
-    if license_col and license_col in filtered.columns:
-        lic_options = ["All Licenses"] + sorted(
-            filtered[license_col].dropna().astype(str).unique().tolist()
+with st.form("total_offense_filters"):
+    t1, t2 = st.columns([2, 2])
+    with t1:
+        offense_type_filter = st.multiselect(
+            "Offense Type",
+            list(OFFENSE_DISPLAY.keys()),
+            default=list(OFFENSE_DISPLAY.keys()),
         )
-    else:
-        lic_options = ["All Licenses"] + LICENSES
-    selected_license = st.selectbox("License / Region", lic_options)
+    with t2:
+        if license_col and license_col in filtered.columns:
+            lic_options_vals = ["All Licenses"] + sorted(
+                filtered[license_col].dropna().astype(str).unique().tolist()
+            )
+        else:
+            lic_options_vals = ["All Licenses"] + LICENSES
+        selected_license = st.selectbox("License / Region", lic_options_vals)
+    st.form_submit_button("🔍 Apply", use_container_width=False)
 
 tot_df = filtered.copy()
 if license_col and license_col in tot_df.columns and selected_license != "All Licenses":
@@ -526,21 +602,19 @@ if tot_rows:
         text="Total Count",
     )
     fig_tot.update_traces(textposition="outside")
-    fig_tot.update_layout(
-        xaxis_title="Total Offenses", coloraxis_showscale=False, height=280
-    )
+    fig_tot.update_layout(xaxis_title="Total Offenses", coloraxis_showscale=False, height=280)
     st.plotly_chart(fig_tot, use_container_width=True)
 
 if not license_col:
-    st.info("License breakdown not yet available. Add a 'License' column (NAM/APAC/IME/EUK) to your sheet — it will be auto-detected.")
+    st.info("Add a 'License' column to your sheet to enable license-based filtering.")
 
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — Offense Breakdown (Clickable)
+# SECTION 6 — Offense Breakdown (Clickable)
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader(f"⚠️ Offense Breakdown — {period_label}")
-st.caption("Click any bar to see which teachers committed that offense.")
+st.caption("Click any bar to drill down and see which teachers committed that offense.")
 
 offense_rows = []
 for label, suffix in OFFENSE_DISPLAY.items():
@@ -584,12 +658,12 @@ if offense_rows:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Rating Trendline + Split
+# SECTION 7 — Rating Trendline + Split
 # ════════════════════════════════════════════════════════════════════════════
 c1, c2 = st.columns(2)
 
 with c1:
-    st.subheader("📉 Rating Trendline Across Periods")
+    st.subheader("📉 Rating Trendline")
     trend_rows = []
     for label, key in PERIODS.items():
         rc_ = f"{key}_rating"
@@ -625,7 +699,7 @@ with c2:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — Extreme Offense Makers
+# SECTION 8 — Extreme Offense Makers
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("🚨 Extreme Offense Makers")
 
@@ -634,7 +708,8 @@ with c_n:
     top_n = st.slider("Show Top N teachers", 10, 200, 50, step=10)
 with c_r2:
     extreme_ratings = st.multiselect(
-        "Filter by Rating", ["Red", "Orange", "Yellow", "Green"], default=["Red", "Orange"]
+        "Filter by Rating", ["Red", "Orange", "Yellow", "Green"],
+        default=["Red", "Orange"], key="extreme_rating_filter"
     )
 
 extreme_df = filtered.copy()
@@ -664,7 +739,7 @@ if tcol in extreme_df.columns:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — Teacher History Table
+# SECTION 9 — Teacher History Table
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("📅 Teacher History Across All Periods")
 st.caption("Full view of each teacher's offense count and rating across every period.")
@@ -691,7 +766,7 @@ st.dataframe(
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — CD Performance (Clickable)
+# SECTION 10 — CD Performance (Clickable)
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("👥 Cluster Director Performance")
 st.caption("Click any CD bar to see all their teachers.")
@@ -729,7 +804,7 @@ if "cd_name" in filtered.columns and rcol in filtered.columns:
     fig_cd.update_traces(textposition="inside")
     fig_cd.update_layout(yaxis=dict(autorange="reversed"), yaxis_title="", legend_title="Rating")
 
-    cd_event = st.plotly_chart(fig_cd, on_select="rerun", use_container_width=True)
+    cd_event = st.plotly_chart(fig_cd, on_select="rerun", use_container_width=True, key="cd_perf_chart")
 
     selected_cd_click = None
     if cd_event and cd_event.selection and cd_event.selection.points:
@@ -754,9 +829,14 @@ if "cd_name" in filtered.columns and rcol in filtered.columns:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — CD Remarks / Reasons Analysis
+# SECTION 11 — CD Remarks & Reasons Analysis
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("💬 CD Remarks & Offense Reasons")
+st.caption(
+    "This section reads the reasons your CDs have logged against each teacher's miss. "
+    "Standard categories: **Personal Reason, Internet Issue, Teacher Lapse, "
+    "Technical Issue, Emergency / Health, Student No Show, System Error, Other.**"
+)
 
 if remarks_col and remarks_col in filtered.columns:
     rem1, rem2 = st.columns([2, 2])
@@ -767,7 +847,7 @@ if remarks_col and remarks_col in filtered.columns:
         )
     with rem2:
         min_off_remarks = st.number_input(
-            "Min total offenses (filter)", min_value=0, value=1, step=1
+            "Min total offenses to include", min_value=0, value=1, step=1
         )
 
     rem_key  = PERIODS[remarks_period]
@@ -777,58 +857,78 @@ if remarks_col and remarks_col in filtered.columns:
         rem_df = rem_df[pd.to_numeric(rem_df[rem_tcol], errors="coerce") >= min_off_remarks]
 
     rem_df = rem_df[rem_df[remarks_col].notna()]
-    rem_df = rem_df[rem_df[remarks_col].astype(str).str.strip() != ""]
+    rem_df = rem_df[rem_df[remarks_col].astype(str).str.strip().str.lower() != ""]
+    rem_df = rem_df[rem_df[remarks_col].astype(str).str.strip().str.lower() != "nan"]
 
-    st.markdown(f"**{len(rem_df)} teachers with remarks logged ({remarks_period})**")
+    st.markdown(f"**{len(rem_df)} teachers with remarks logged for {remarks_period}**")
 
-    # Overall reason frequency
-    reason_counts = rem_df[remarks_col].value_counts().reset_index()
+    # ── Reason frequency — primary chart ─────────────────────────────────
+    reason_counts = rem_df[remarks_col].astype(str).str.strip().value_counts().reset_index()
     reason_counts.columns = ["Reason", "Teachers"]
+
+    # Flag which reasons match standard categories
+    std_lower = [r.lower() for r in REASON_CATEGORIES]
+    reason_counts["Category"] = reason_counts["Reason"].apply(
+        lambda x: "Standard" if x.lower() in std_lower else "Custom / Free Text"
+    )
 
     fig_rem = px.bar(
         reason_counts, x="Teachers", y="Reason", orientation="h",
-        color="Teachers", color_continuous_scale=["#3498db", "#e74c3c"],
+        color="Category",
+        color_discrete_map={"Standard": "#3498db", "Custom / Free Text": "#e67e22"},
         text="Teachers",
+        category_orders={"Reason": reason_counts["Reason"].tolist()},
     )
     fig_rem.update_traces(textposition="outside")
     fig_rem.update_layout(
-        xaxis_title="Number of Teachers", coloraxis_showscale=False,
-        yaxis=dict(autorange="reversed"), height=max(300, len(reason_counts) * 40)
+        xaxis_title="Number of Teachers",
+        yaxis=dict(autorange="reversed"),
+        legend_title="Reason Type",
+        height=max(320, len(reason_counts) * 42),
     )
     st.plotly_chart(fig_rem, use_container_width=True)
 
-    # CD-wise breakdown — shows which CD's teachers gave each reason
+    st.caption(
+        "🔵 Blue = standard category  |  🟠 Orange = free-text entry from CD. "
+        "Ask your CDs to use the standard categories listed above for cleaner reporting."
+    )
+
+    # ── CD-wise breakdown ────────────────────────────────────────────────
     st.markdown("**Which CD's teachers gave each reason:**")
-    cd_reason_df = rem_df.groupby([remarks_col, "cd_name"]).size().reset_index(name="Teachers")
-    cd_reason_df.columns = ["Reason", "CD Name", "Teachers"]
+    cd_reason_df = (
+        rem_df.groupby([remarks_col, "cd_name"]).size()
+        .reset_index(name="Teachers")
+        .rename(columns={remarks_col: "Reason", "cd_name": "CD Name"})
+    )
     cd_reason_df = cd_reason_df.sort_values(["Reason", "Teachers"], ascending=[True, False])
 
     fig_cd_rem = px.bar(
         cd_reason_df, x="Teachers", y="Reason", color="CD Name",
         orientation="h", barmode="stack",
-        labels={"Reason": "Offense Reason", "CD Name": "Cluster Director"},
         height=max(350, len(cd_reason_df["Reason"].unique()) * 50),
     )
     fig_cd_rem.update_layout(
         xaxis_title="Number of Teachers",
         yaxis=dict(autorange="reversed"),
-        legend_title="CD Name",
+        legend_title="Cluster Director",
     )
-    st.plotly_chart(fig_cd_rem, use_container_width=True)
+    st.plotly_chart(fig_cd_rem, use_container_width=True, key="cd_remarks_chart")
 
-    # Drill into a specific reason
+    # ── Drill into one reason ────────────────────────────────────────────
+    st.markdown("**See all teachers for a specific reason:**")
     reason_select = st.selectbox(
-        "See teachers for a specific reason",
-        ["— select —"] + reason_counts["Reason"].tolist()
+        "Select reason", ["— select —"] + reason_counts["Reason"].tolist()
     )
     if reason_select != "— select —":
-        reason_teachers = rem_df[rem_df[remarks_col] == reason_select]
+        reason_teachers = rem_df[rem_df[remarks_col].astype(str).str.strip() == reason_select]
         show_rem = ["db_id", "teacher_name", "cd_name", rcol]
         if rem_tcol in reason_teachers.columns:
             show_rem.append(rem_tcol)
         show_rem = [c for c in show_rem if c in reason_teachers.columns]
-        rename_rem = {"db_id": "DB ID", "teacher_name": "Teacher", "cd_name": "CD",
-                      rcol: "Rating", rem_tcol: "Total Offenses"}
+        rename_rem = {
+            "db_id": "DB ID", "teacher_name": "Teacher", "cd_name": "CD",
+            rcol: "Rating", rem_tcol: "Total Offenses",
+        }
         st.markdown(f"**{len(reason_teachers)} teachers — {reason_select}:**")
         st.dataframe(
             reason_teachers[show_rem].rename(columns=rename_rem).reset_index(drop=True),
@@ -836,17 +936,22 @@ if remarks_col and remarks_col in filtered.columns:
         )
 else:
     st.info(
-        "CD Remarks not yet mapped. In the sidebar, select the column that contains "
-        "CD remarks/reasons to see this analysis."
+        "CD Remarks column not yet mapped. In the sidebar under **⚙️ Column Settings**, "
+        "select the column that contains your CD remarks or reasons."
+    )
+    st.markdown("**Standard reason categories your CDs should use:**")
+    st.dataframe(
+        pd.DataFrame({"Category": REASON_CATEGORIES}),
+        use_container_width=True, hide_index=True
     )
 
 st.divider()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 10 — Teacher Profile Search
+# SECTION 12 — Teacher Profile Search
 # ════════════════════════════════════════════════════════════════════════════
 st.subheader("🔍 Teacher Profile")
-st.caption("Search by teacher name or DB ID to see their full history across all periods.")
+st.caption("Search by teacher name or DB ID to see their full history and live offense breakdown.")
 
 search = st.text_input("Search", placeholder="Type a name or DB ID...")
 
@@ -858,7 +963,7 @@ if search:
     results = filtered[mask]
 
     if len(results) == 0:
-        st.warning("No teacher found.")
+        st.warning("No teacher found. Try a different name or DB ID.")
     else:
         for _, t in results.iterrows():
             with st.expander(
@@ -881,7 +986,7 @@ if search:
                     if comms_app_url:
                         st.markdown(f"[📨 Open in Communications App]({comms_app_url})")
                     else:
-                        st.caption("Add your comms app URL in the sidebar to enable this link.")
+                        st.caption("Add your Communications App URL in the sidebar to enable this link.")
 
                 with col_b:
                     st.markdown("**Live offense breakdown:**")
