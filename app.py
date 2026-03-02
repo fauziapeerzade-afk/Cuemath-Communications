@@ -152,11 +152,11 @@ with tab2:
 
         with f2:
             offense_options  = df_dash[col_map["offense"]].dropna().unique().tolist()
-            selected_offenses = st.multiselect("Offense Type", offense_options, default=offense_options)
+            selected_offenses = st.multiselect("Offense Type", offense_options, default=offense_options, key="offense_filter_dash")
 
         with f3:
             if col_map.get("cd"):
-                cd_options  = ["All CDs"] + sorted(df_dash[col_map["cd"]].dropna().unique().tolist())
+                cd_options  = ["All CDs"] + sorted(df_dash[col_map["cd"]].dropna().astype(str).unique().tolist())
                 selected_cd = st.selectbox("Cluster Director", cd_options)
             else:
                 selected_cd = "All CDs"
@@ -385,7 +385,7 @@ with tab3:
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
             all_offenses   = df[col_map["offense"]].dropna().unique().tolist()
-            offense_filter = st.multiselect("Offense Type", all_offenses, default=all_offenses)
+            offense_filter = st.multiselect("Offense Type", all_offenses, default=all_offenses, key="offense_filter_send")
         with c2:
             filter_date = st.date_input(
                 "Offense Date",
@@ -511,6 +511,6 @@ with tab4:
         st.download_button(
             "⬇️ Download Log as CSV",
             data=csv_data,
-            file_name=f"qmath_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            file_name=f"cuemath_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
