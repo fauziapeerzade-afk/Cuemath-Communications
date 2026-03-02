@@ -129,13 +129,25 @@ with tab2:
         )
         df_dash = df_dash.dropna(subset=[col_map["date"]])
 
+        if df_dash.empty:
+            st.warning(
+                "No valid dates found in the date column you mapped. "
+                "Please check that the column contains dates (e.g. 2026-02-28 or 28/02/2026)."
+            )
+            st.stop()
+
         # ── Dashboard Filters ────────────────────────────────────────────────
         st.subheader("Filters")
         f1, f2, f3 = st.columns([2, 2, 2])
 
         with f1:
-            min_date = df_dash[col_map["date"]].min().date()
-            max_date = df_dash[col_map["date"]].max().date()
+            try:
+                min_date = df_dash[col_map["date"]].min().date()
+                max_date = df_dash[col_map["date"]].max().date()
+            except Exception:
+                from datetime import date as dt_date
+                min_date = dt_date.today()
+                max_date = dt_date.today()
             date_range = st.date_input("Date Range", value=(min_date, max_date))
 
         with f2:
